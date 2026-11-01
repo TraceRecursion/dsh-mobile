@@ -67,70 +67,63 @@ val tsnetAarFile = File(tsnetSrcDir, "build/tsnetgo/tsnetgo.aar")
 // gomobile 不会自建输出目录。
 File(tsnetSrcDir, "build/tsnetgo").mkdirs()
 
-fun resolveAndroidSdkDir(): File {
-    val props = Properties()
-    val local = rootProject.file("local.properties")
-    if (local.exists()) local.inputStream().use { props.load(it) }
-    val candidates = listOfNotNull(
-        props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let { File(it) },
-        System.getenv("ANDROID_HOME")?.let { File(it) },
-        System.getenv("ANDROID_SDK_ROOT")?.let { File(it) }
-    )
-    return candidates.firstOrNull { it.isDirectory }
-        ?: throw GradleException(
-            "找不到 Android SDK：设置 ANDROID_HOME，或在 local.properties 写 sdk.dir"
-        )
-}
-
-val tsnetSdkDir = resolveAndroidSdkDir()
-val tsnetNdkDir = File(tsnetSdkDir, "ndk").listFiles()?.filter { it.isDirectory }?.maxByOrNull { it.name }
-    ?: throw GradleException(
-        "未找到 NDK：${File(tsnetSdkDir, "ndk")} —— 先执行 sdkmanager \"ndk;27.0.12077973\""
-    )
-val tsnetGoBin = System.getenv("GOPATH")?.let { File(it, "bin") }
-    ?: File(System.getProperty("user.home"), "go/bin")
-val tsnetGomobile = listOf(
-    File(tsnetGoBin, "gomobile"),
-    File("/opt/homebrew/bin/gomobile"),
-    File("/usr/local/bin/gomobile")
-).firstOrNull { it.canExecute() }?.absolutePath
-    ?: throw GradleException(
-        "未找到 gomobile：go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init"
-    )
-
 // 接口枚举的三种取法（见 tsnetgo/getter_*.go）。默认空 = 不加任何 getter，
 // 在 Android 上会失败，用来确认失败点没有变化。
-val tsnetTags = (providers.gradleProperty("tsnet.tags").orNull ?: "").trim()
-
 val buildTsnetAar = tasks.register<Exec>("buildTsnetAar") {
     group = "build"
     description = "gomobile bind ./tsnetgo -> AAR（需要 Go 与 Android NDK）"
     val apiLevel = 24 // 必须 <= android.defaultConfig.minSdk，否则低版本设备 UnsatisfiedLinkError
+    val tags = (providers.gradleProperty("tsnet.tags").orNull ?: "").trim() // 本地副本：doFirst 里不能引用脚本级属性
+    // 只在这个任务被配置时求值，并且**不在配置期抛错**：之前抛错让任何 Gradle 调用
+    // （包括 Xcode 的 "Build KMP Framework" 阶段）都要求本机有 Android SDK，iOS 构建被无端挡住。
+    // 这里用局部变量而不是脚本级属性：doFirst 捕获局部值才符合配置缓存的要求。
+    val sdkProps = Properties()
+    val sdkLocalFile = rootProject.file("local.properties")
+    if (sdkLocalFile.exists()) sdkLocalFile.inputStream().use { sdkProps.load(it) }
+    val sdkDir: File? = listOfNotNull(
+        sdkProps.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let { File(it) },
+        System.getenv("ANDROID_HOME")?.takeIf { it.isNotBlank() }?.let { File(it) },
+        System.getenv("ANDROID_SDK_ROOT")?.takeIf { it.isNotBlank() }?.let { File(it) }
+    ).firstOrNull { it.isDirectory }
+    val ndkDir: File? = sdkDir?.let { File(it, "ndk").listFiles()?.filter { f -> f.isDirectory }?.maxByOrNull { f -> f.name } }
+    val goBin: File = System.getenv("GOPATH")?.let { File(it, "bin") }
+        ?: File(System.getProperty("user.home"), "go/bin")
+    val gomobile: String? = listOf(
+        File(goBin, "gomobile"),
+        File("/opt/homebrew/bin/gomobile"),
+        File("/usr/local/bin/gomobile")
+    ).firstOrNull { it.canExecute() }?.absolutePath
     inputs.dir(tsnetSrcDir)
-    inputs.property("tsnet.tags", tsnetTags)
+    inputs.property("tsnet.tags", tags)
     outputs.dir(File(tsnetSrcDir, "build"))
     workingDir = tsnetSrcDir
-    environment("ANDROID_HOME", tsnetSdkDir.absolutePath)
-    environment("ANDROID_SDK_ROOT", tsnetSdkDir.absolutePath)
-    environment("ANDROID_NDK_HOME", tsnetNdkDir.absolutePath)
-    environment("NDK_HOME", tsnetNdkDir.absolutePath)
-    // 16 KB 页对齐：Android 15+ 的新内核与 Google Play 对 targetSdk≥35 都要求 ELF 段按 16 KB 对齐。
-    // 实测证据：不加这行时 libgojni.so 的 LOAD 对齐是 0x1000（真机上 HyperOS 会弹「Android 应用兼容性」警告），
-    // 加上后是 0x4000，且 16 KB 对齐的库在 4 KB 页设备上照常加载。
-    environment("CGO_LDFLAGS", "-Wl,-z,max-page-size=16384")
-    environment(
-        "PATH", listOf(tsnetGoBin.absolutePath, System.getenv("PATH").orEmpty())
-            .filter(String::isNotBlank).joinToString(":")
-    )
-    val args = mutableListOf(
-        tsnetGomobile, "bind",
-        "-target=android", "-androidapi", apiLevel.toString()
-    )
-    if (tsnetTags.isNotEmpty()) {
-        args += listOf("-tags", tsnetTags)
+    doFirst {
+        val sdk = sdkDir ?: throw GradleException(
+            "找不到 Android SDK：设置 ANDROID_HOME，或在 local.properties 写 sdk.dir"
+        )
+        val ndk = ndkDir ?: throw GradleException(
+            "未找到 NDK：${File(sdk, "ndk")} —— 先执行 sdkmanager \"ndk;27.0.12077973\""
+        )
+        val tool = gomobile ?: throw GradleException(
+            "未找到 gomobile：go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init"
+        )
+        environment("ANDROID_HOME", sdk.absolutePath)
+        environment("ANDROID_SDK_ROOT", sdk.absolutePath)
+        environment("ANDROID_NDK_HOME", ndk.absolutePath)
+        environment("NDK_HOME", ndk.absolutePath)
+        // 16 KB 页对齐：Android 15+ 的新内核与 Google Play 对 targetSdk≥35 都要求 ELF 段按 16 KB 对齐。
+        // 实测证据：不加这行时 libgojni.so 的 LOAD 对齐是 0x1000（真机上 HyperOS 会弹「Android 应用兼容性」警告），
+        // 加上后是 0x4000，且 16 KB 对齐的库在 4 KB 页设备上照常加载。
+        environment("CGO_LDFLAGS", "-Wl,-z,max-page-size=16384")
+        environment("PATH", listOf(goBin.absolutePath, System.getenv("PATH").orEmpty())
+            .filter(String::isNotBlank).joinToString(":"))
+        val args = mutableListOf(tool, "bind", "-target=android", "-androidapi", apiLevel.toString())
+        if (tags.isNotEmpty()) {
+            args += listOf("-tags", tags)
+        }
+        args += listOf("-o", "build/tsnetgo/tsnetgo.aar", ".")
+        commandLine(args)
     }
-    args += listOf("-o", "build/tsnetgo/tsnetgo.aar", ".")
-    commandLine(args)
 }
 
 dependencies {
