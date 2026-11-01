@@ -31,11 +31,13 @@ class DshAndroidApplication : Application(), DefaultLifecycleObserver {
         private set
 
     /**
-     * 连接路径策略（VPN 语义）：内部节点在跑，连接就走它的 SOCKS5；否则直连。
+     * 连接路径策略（VPN 语义）：内部节点可用，连接就走它的 CONNECT 出口；否则直连。
      * 传输层不需要知道这里为什么有代理，也不判断地址属于哪个网段。
      */
     internal fun routeClient(): okhttp3.OkHttpClient {
-        val proxy = tunnel.proxyForRoute() ?: return com.clarklevis.dsh.android.platform.OkHttpGatewayTransport.defaultClient()
+        val proxy = tunnel.proxyForRoute()
+        graph.diagnostics.transportRoute(routedThroughNode = proxy != null)
+        if (proxy == null) return com.clarklevis.dsh.android.platform.OkHttpGatewayTransport.defaultClient()
         return com.clarklevis.dsh.android.platform.OkHttpGatewayTransport.proxiedClient(
             proxy.host, proxy.port, proxy.user, proxy.pass
         )

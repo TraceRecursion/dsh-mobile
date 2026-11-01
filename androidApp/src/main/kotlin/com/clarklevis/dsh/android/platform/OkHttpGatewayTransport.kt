@@ -22,9 +22,10 @@ internal class OkHttpGatewayTransport(
     private val clientProvider: () -> OkHttpClient = { defaultClient() },
     private val diagnostics: AndroidGatewayDiagnostics = AndroidGatewayDiagnostics.disabled()
 ) : GatewayTransport {
-    // 传输层不知道网络路径：走不走"内部节点"由外部提供的策略决定，
-    // 这里只负责每次 open 时取当时的客户端（代理可能刚起来/刚没了）。
-    private var client: OkHttpClient = clientProvider()
+    // 传输层不知道网络路径：走不走"内部节点"由外部提供的策略决定。
+    // 刻意不在构造时取客户端：构造发生在 Application 启动早期，那时 graph 与隧道都还不存在
+    // （真机崩溃实证：lateinit property hosts has not been initialized）。每次 open 才问一次策略——
+    // 代理可能刚起来，也可能刚被关掉。
     private val activeGeneration = AtomicLong()
     private val mutableState = MutableStateFlow<GatewayTransportState>(GatewayTransportState.Closed())
     private val eventQueue = BoundedTransportEventQueue(
@@ -48,7 +49,7 @@ internal class OkHttpGatewayTransport(
             socket?.cancel()
             socket = null
         }
-        client = clientProvider()
+        val client = clientProvider()
         publishState(GatewayTransportState.Opening(spec.generation))
         val request = Request.Builder()
             .url(spec.endpoint)

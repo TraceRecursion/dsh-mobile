@@ -225,6 +225,14 @@ internal class AndroidGatewayDiagnostics private constructor(
     }
 
     /**
+     * 这次连接走的是哪条路径：直连，还是经应用内的 Tailscale 节点出口。
+     * 没有它，"到底走没走隧道"只能靠对端流量猜——真机排障时就卡在这儿的。
+     */
+    fun transportRoute(routedThroughNode: Boolean) {
+        emit(Log.INFO, "transport route=${if (routedThroughNode) "node" else "direct"}")
+    }
+
+    /**
      * 握手被拒绝时，服务端回给客户端的原因。刻意不包含 URL、凭据、设备标识。
      * 有了它，"403/401 为什么" 就不必靠猜（真机上就是这么缺的）。
      */
